@@ -5,6 +5,9 @@ version = "0.1.0"
 edition = "2021"
 categories = ["asynchronous"]
 keywords = ["io", "async", "non-blocking", "blocking", "futures"]
+license = "MIT"
+readme = "README.md"
+authors = ["Khashayar Fereidani"]
 
 [dev-dependencies]
 criterion = "0.5"
