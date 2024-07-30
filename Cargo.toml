@@ -1,0 +1,16 @@
+[package]
+name = "swait"
+description = "A Simple Utility for Blocking on Futures"
+version = "0.1.0"
+edition = "2021"
+categories = ["asynchronous"]
+keywords = ["io", "async", "non-blocking", "blocking", "futures"]
+
+[dev-dependencies]
+criterion = "0.5"
+kanal = "0.1.0-pre8"
+pollster = "x"
+
+[[bench]]
+name = "benchmark"
+harness = false
