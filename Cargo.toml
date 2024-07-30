@@ -12,8 +12,10 @@ authors = ["Khashayar Fereidani"]
 [dev-dependencies]
 criterion = "0.5"
 kanal = "0.1.0-pre8"
-pollster = "x"
+pollster = "0.3"
 
 [[bench]]
 name = "benchmark"
 harness = false
+
+[dependencies]
