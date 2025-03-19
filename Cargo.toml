@@ -1,8 +1,10 @@
 [package]
 name = "swait"
 description = "A Simple Utility for Blocking on Futures"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+repository = "https://github.com/fereidani/swait"
+documentation = "https://docs.rs/swait"
 categories = ["asynchronous"]
 keywords = ["io", "async", "non-blocking", "blocking", "futures"]
 license = "MIT"
@@ -11,7 +13,7 @@ authors = ["Khashayar Fereidani"]
 
 [dev-dependencies]
 criterion = "0.5"
-kanal = "0.1.0-pre8"
+kanal = "0.1"
 pollster = "0.3"
 
 [[bench]]

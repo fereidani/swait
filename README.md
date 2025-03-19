@@ -1,4 +1,15 @@
-# `swait` - A Simple Utility for Blocking on Futures
+# `swait` - A Simple Utility for Blocking synchronously on Futures
+
+[![Crates.io][crates-badge]][crates-url]
+[![Documentation][doc-badge]][doc-url]
+[![MIT licensed][mit-badge]][mit-url]
+
+[crates-badge]: https://img.shields.io/crates/v/swait.svg?style=for-the-badge
+[crates-url]: https://crates.io/crates/swait
+[mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge
+[mit-url]: https://github.com/fereidani/swait/blob/master/LICENSE
+[doc-badge]: https://img.shields.io/docsrs/swait?style=for-the-badge
+[doc-url]: https://docs.rs/swait
 
 The `swait` library provides a utility to block the current thread until a given future is ready. This is particularly useful in scenarios where asynchronous operations need to be synchronized with blocking code.
 The name `swait` is derived from the term `await` in Rust, indicating a synchronous wait operation.
@@ -16,7 +27,7 @@ To include `swait` in your project, add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-swait = "0.1.0"
+swait = "0.1"
 ```
 
 Then, include it in your project:
