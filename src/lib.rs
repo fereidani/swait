@@ -2,14 +2,17 @@
 
 use std::{
     future::Future,
+    hint::spin_loop,
     pin::*,
     sync::{
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicU8, AtomicUsize, Ordering},
         Arc,
     },
     task::*,
-    thread::{yield_now, Thread},
+    thread::{available_parallelism, yield_now, Thread},
 };
+
+use branches::{likely, unlikely};
 
 thread_local! {
     // A reusable signal instance per thread.
@@ -57,39 +60,35 @@ impl Signal {
     }
 
     fn wait(&self) {
-        // Try to fetch in short spin
-        for _ in 0..16 {
-            if self
-                .state
+        if likely(cond_spin(|| {
+            self.state
                 .compare_exchange(NOTIFIED, WAITING, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
-            {
-                return;
-            }
-            yield_now();
+        })) {
+            return;
         }
         // Park current thread
-        if self
-            .state
-            .compare_exchange(WAITING, PARKED, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
-        {
+        if likely(
+            self.state
+                .compare_exchange(WAITING, PARKED, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err(),
+        ) {
             // already notified, reset state to waiting
             self.state.store(WAITING, Ordering::Release);
             return;
         }
-        while self
-            .state
-            .compare_exchange(NOTIFIED, WAITING, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
-        {
+        while unlikely(
+            self.state
+                .compare_exchange(NOTIFIED, WAITING, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err(),
+        ) {
             std::thread::park();
         }
     }
 
     #[inline(always)]
     fn notify(&self) {
-        if self.state.swap(NOTIFIED, Ordering::AcqRel) == PARKED {
+        if likely(self.state.swap(NOTIFIED, Ordering::AcqRel) == PARKED) {
             self.owning_thread.unpark();
         }
     }
@@ -106,6 +105,67 @@ impl Wake for Signal {
     }
 }
 
+#[inline(always)]
+fn is_multithreaded_env() -> bool {
+    static PARRALLELISM: AtomicUsize = AtomicUsize::new(0);
+    let parrallelism = PARRALLELISM.load(Ordering::Relaxed);
+    if parrallelism == 0 {
+        let parallelism: usize =
+            usize::from(available_parallelism().unwrap_or(std::num::NonZero::new(1).unwrap()));
+        PARRALLELISM.store(parallelism, Ordering::Relaxed);
+        parallelism > 1
+    } else {
+        parrallelism > 1
+    }
+}
+
+/**
+ * Attempts to satisfy a given predicate by first executing a series of busy-wait spin loops,
+ * and if unsuccessful, by yielding the current thread.
+ *
+ * function marks all branches as `likely`` to help the compiler optimize the code for exiting
+ * although it is unlikely in reality, it helps performance.
+ *
+ * Returns:
+ *   - `true` if the predicate returns `true` during any of the spin or yield phases.
+ *   - `false` if the predicate remains unmet after the advised spinning and yielding, suggesting
+ *     that further spinning is unlikely to be beneficial and parking the thread may be more appropriate.
+ */
+#[inline(always)]
+fn cond_spin(predicate: impl Fn() -> bool) -> bool {
+    // exit early if predicate is already satisfied
+    if likely(predicate()) {
+        return true;
+    }
+    const SPINING_COUNT: usize = 5;
+    const YIELD_COUNT: usize = 5;
+    // skip busy-wait spinning if the environment is not multithreaded
+    if is_multithreaded_env() {
+        for shift in 1..(1 + SPINING_COUNT) {
+            for _ in 0..1 << shift {
+                spin_loop();
+            }
+            if likely(predicate()) {
+                return true;
+            }
+        }
+        for _ in 0..YIELD_COUNT {
+            yield_now();
+            if likely(predicate()) {
+                return true;
+            }
+        }
+    } else {
+        for _ in 0..(YIELD_COUNT + SPINING_COUNT) {
+            yield_now();
+            if likely(predicate()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /// Blocks the current thread until the given future is ready.
 ///
 /// # Example
@@ -114,13 +174,20 @@ impl Wake for Signal {
 /// let my_fut = async {};
 /// let result = swait::swait(my_fut);
 /// ```
+///
+/// # Example 2
+///
+/// ```
+/// use swait::FutureExt;
+/// let my_fut = async {};
+/// let result = my_fut.swait();
+/// ```
 #[inline(always)]
 pub fn swait<F: Future>(mut fut: F) -> F::Output {
     let mut fut = pin!(fut);
     THREAD_SIGNAL.with(|signal| {
         let waker = Waker::from(Arc::clone(signal));
         let mut context = Context::from_waker(&waker);
-
         loop {
             match fut.as_mut().poll(&mut context) {
                 Poll::Pending => signal.wait(),
