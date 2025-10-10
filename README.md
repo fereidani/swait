@@ -13,7 +13,7 @@
 
 The `swait` library provides a utility to block the current thread until a given future is ready. This is particularly useful in scenarios where asynchronous operations need to be synchronized with blocking code.
 The name `swait` is derived from the term `await` in Rust, indicating a synchronous wait operation.
-The `swait` library originated from an attempt to improve the performance of the `pollster` crate through a pull request, which ultimately did not get merged.
+The `swait` library originated from an attempt to improve the performance of the `pollster` crate through a pull request, ~~which ultimately did not get merged~~.
 
 ## Features
 
@@ -86,7 +86,7 @@ The core of `swait` is built around a `Signal` structure, which manages the stat
 
 ### `Signal` Structure
 
-The `Signal` structure manages the state of a waiting thread and provides methods to wait for and notify the thread. It uses an `AtomicU8` to track the state, which can be `WAITING`, `PARKED`, or `NOTIFIED`.
+The `Signal` structure manages the state of a waiting thread and provides methods to wait for and notify the thread.
 
 - **`wait` Method:** This method blocks the thread using a combination of spinning, yielding, and parking.
 - **`notify` Method:** This method notifies and wakes the thread if it is parked.

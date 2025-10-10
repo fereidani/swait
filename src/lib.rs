@@ -1,18 +1,17 @@
 #![doc = include_str!("../README.md")]
 
+use branches::{likely, unlikely};
 use std::{
     future::Future,
     hint::spin_loop,
     pin::*,
     sync::{
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         Arc,
     },
     task::*,
-    thread::{available_parallelism, yield_now, Thread},
+    thread::{available_parallelism, yield_now as os_yield, Thread},
 };
-
-use branches::{likely, unlikely};
 
 thread_local! {
     // A reusable signal instance per thread.
@@ -41,56 +40,74 @@ pub trait FutureExt: Future {
 
 impl<F: Future> FutureExt for F {}
 
-const WAITING: u8 = 0;
-const PARKED: u8 = 1;
-const NOTIFIED: u8 = 255;
-
 struct Signal {
-    state: AtomicU8,
     owning_thread: Thread,
+}
+
+macro_rules! return_if_ready {
+    ($fut:expr,$context:expr) => {
+        let poll_result = $fut.as_mut().poll($context);
+        if likely(poll_result.is_ready()) {
+            if let Poll::Ready(result) = poll_result {
+                return result;
+            }
+        }
+    };
 }
 
 impl Signal {
     #[inline(always)]
     fn new() -> Self {
         Self {
-            state: AtomicU8::new(WAITING),
             owning_thread: std::thread::current(),
         }
     }
 
-    fn wait(&self) {
-        if likely(cond_spin(|| {
-            self.state
-                .compare_exchange(NOTIFIED, WAITING, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-        })) {
-            return;
+    fn wait<F: Future>(&self, context: &mut Context<'_>, mut fut: Pin<&mut F>) -> F::Output {
+        if is_multithreaded_env() {
+            // exit early if predicate is already satisfied
+            if let Poll::Ready(result) = fut.as_mut().poll(context) {
+                return result;
+            }
+            const SPINING_COUNT: usize = 5;
+            const YIELD_COUNT: usize = 5;
+            // skip busy-wait spinning if the environment is not multithreaded
+            if is_multithreaded_env() {
+                for shift in 1..(1 + SPINING_COUNT) {
+                    for _ in 0..1 << shift {
+                        spin_loop();
+                    }
+                    return_if_ready!(fut, context);
+                }
+                for _ in 0..YIELD_COUNT {
+                    os_yield();
+                    return_if_ready!(fut, context);
+                }
+            } else {
+                // in single threaded environment busy-spinning just wastes CPU cycles
+                // we only use os yield syscall to deschedule the thread
+                for _ in 0..(YIELD_COUNT + SPINING_COUNT) {
+                    os_yield();
+                    return_if_ready!(fut, context);
+                }
+            }
         }
-        // Park current thread
-        if likely(
-            self.state
-                .compare_exchange(WAITING, PARKED, Ordering::AcqRel, Ordering::Relaxed)
-                .is_err(),
-        ) {
-            // already notified, reset state to waiting
-            self.state.store(WAITING, Ordering::Release);
-            return;
-        }
-        while unlikely(
-            self.state
-                .compare_exchange(NOTIFIED, WAITING, Ordering::AcqRel, Ordering::Relaxed)
-                .is_err(),
-        ) {
-            std::thread::park();
+        // park the thread early so we don't poll again
+        std::thread::park();
+        loop {
+            match fut.as_mut().poll(context) {
+                Poll::Ready(result) => return result,
+                Poll::Pending => {
+                    // if it is still pending park the thread
+                    std::thread::park();
+                }
+            }
         }
     }
 
     #[inline(always)]
     fn notify(&self) {
-        if likely(self.state.swap(NOTIFIED, Ordering::AcqRel) == PARKED) {
-            self.owning_thread.unpark();
-        }
+        self.owning_thread.unpark();
     }
 }
 
@@ -107,63 +124,16 @@ impl Wake for Signal {
 
 #[inline(always)]
 fn is_multithreaded_env() -> bool {
-    static PARRALLELISM: AtomicUsize = AtomicUsize::new(0);
-    let parrallelism = PARRALLELISM.load(Ordering::Relaxed);
-    if parrallelism == 0 {
+    static PARALLELISM: AtomicUsize = AtomicUsize::new(0);
+    let parallelism = PARALLELISM.load(Ordering::Relaxed);
+    if unlikely(parallelism == 0) {
         let parallelism: usize =
             usize::from(available_parallelism().unwrap_or(std::num::NonZero::new(1).unwrap()));
-        PARRALLELISM.store(parallelism, Ordering::Relaxed);
+        PARALLELISM.store(parallelism, Ordering::Relaxed);
         parallelism > 1
     } else {
-        parrallelism > 1
+        parallelism > 1
     }
-}
-
-/**
- * Attempts to satisfy a given predicate by first executing a series of busy-wait spin loops,
- * and if unsuccessful, by yielding the current thread.
- *
- * function marks all branches as `likely`` to help the compiler optimize the code for exiting
- * although it is unlikely in reality, it helps performance.
- *
- * Returns:
- *   - `true` if the predicate returns `true` during any of the spin or yield phases.
- *   - `false` if the predicate remains unmet after the advised spinning and yielding, suggesting
- *     that further spinning is unlikely to be beneficial and parking the thread may be more appropriate.
- */
-#[inline(always)]
-fn cond_spin(predicate: impl Fn() -> bool) -> bool {
-    // exit early if predicate is already satisfied
-    if likely(predicate()) {
-        return true;
-    }
-    const SPINING_COUNT: usize = 5;
-    const YIELD_COUNT: usize = 5;
-    // skip busy-wait spinning if the environment is not multithreaded
-    if is_multithreaded_env() {
-        for shift in 1..(1 + SPINING_COUNT) {
-            for _ in 0..1 << shift {
-                spin_loop();
-            }
-            if likely(predicate()) {
-                return true;
-            }
-        }
-        for _ in 0..YIELD_COUNT {
-            yield_now();
-            if likely(predicate()) {
-                return true;
-            }
-        }
-    } else {
-        for _ in 0..(YIELD_COUNT + SPINING_COUNT) {
-            yield_now();
-            if likely(predicate()) {
-                return true;
-            }
-        }
-    }
-    return false;
 }
 
 /// Blocks the current thread until the given future is ready.
@@ -183,16 +153,14 @@ fn cond_spin(predicate: impl Fn() -> bool) -> bool {
 /// let result = my_fut.swait();
 /// ```
 #[inline(always)]
-pub fn swait<F: Future>(mut fut: F) -> F::Output {
+pub fn swait<F: Future>(fut: F) -> F::Output {
     let mut fut = pin!(fut);
     THREAD_SIGNAL.with(|signal| {
         let waker = Waker::from(Arc::clone(signal));
         let mut context = Context::from_waker(&waker);
-        loop {
-            match fut.as_mut().poll(&mut context) {
-                Poll::Pending => signal.wait(),
-                Poll::Ready(result) => return result,
-            }
+        match fut.as_mut().poll(&mut context) {
+            Poll::Pending => signal.wait(&mut context, fut.as_mut()),
+            Poll::Ready(result) => result,
         }
     })
 }
