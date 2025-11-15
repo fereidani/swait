@@ -1,7 +1,7 @@
 [package]
 name = "swait"
 description = "A Simple Utility for Blocking on Futures"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 repository = "https://github.com/fereidani/swait"
 documentation = "https://docs.rs/swait"
