@@ -5,23 +5,22 @@ use std::{
     future::Future,
     hint::spin_loop,
     marker::PhantomPinned,
+    mem::forget,
     pin::*,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     task::*,
     thread::{available_parallelism, yield_now as os_yield, Thread},
 };
 
 thread_local! {
     // A reusable signal instance per thread.
-    static THREAD_SIGNAL: (Pin<Box<Signal>>, Waker) = {
+    static THREAD_SIGNAL: (Arc<Signal>, Waker) = {
         // Pinned boxed signal to ensure it has a stable address and upholds Pin guarantees
-        let signal = Box::pin(Signal::new());
-        let waker = unsafe {
-            // SAFETY: The waker is guaranteed to not outlive the current thread
-            // because it is stored in a thread-local variable along with the signal.
-            // basically both have the same lifetime.
-            signal.borrow_waker()
-        };
+        let signal = Arc::new(Signal::new());
+        let waker = signal.get_waker();
         (signal, waker)
     };
 }
@@ -74,20 +73,32 @@ impl Signal {
     }
 
     /// Creates a waker that notifies this signal when woken.
-    /// # Safety
-    /// The returned waker must not outlive the current thread/signal.
-    /// this function relies on the fact that Signal is pinned and has a stable address.
-    unsafe fn borrow_waker(&self) -> Waker {
-        const WAKE_FN: unsafe fn(*const ()) = |data: *const ()| unsafe {
-            (&*(data as *const Signal)).notify();
-        };
+    fn get_waker(self: &Arc<Signal>) -> Waker {
         static VTABLE: RawWakerVTable = RawWakerVTable::new(
-            |data: *const ()| RawWaker::new(data, &VTABLE),
-            WAKE_FN,
-            WAKE_FN,
-            |_: *const ()| { /* no-op */ },
+            |data: *const ()| {
+                // SAFETY: we have owning reference here and it is safe to clone it
+                let this = unsafe { Arc::from_raw(data as *const Signal) };
+                let clone = Arc::into_raw(this.clone());
+                // avoid decreasing the ref count after cloning
+                forget(this);
+                RawWaker::new(clone as *const (), &VTABLE)
+            },
+            |data: *const ()| unsafe {
+                // SAFETY: we have owning reference here and it is safe to use and destroy it
+                (&*(data as *const Signal)).notify();
+                let _ = Arc::from_raw(data as *const Signal);
+            },
+            |data: *const ()| unsafe {
+                // SAFETY: we have owning reference here and it is safe to use it
+                (&*(data as *const Signal)).notify();
+            },
+            |data: *const ()| unsafe {
+                // SAFETY: we have owning reference here and we are safe to drop it
+                let _ = Arc::from_raw(data as *const Signal);
+            },
         );
-        let raw_waker = RawWaker::new(self as *const _ as *const (), &VTABLE);
+        let sig_clone = Arc::into_raw(self.clone());
+        let raw_waker = RawWaker::new(sig_clone as *const _ as *const (), &VTABLE);
         unsafe { Waker::from_raw(raw_waker) }
     }
 
